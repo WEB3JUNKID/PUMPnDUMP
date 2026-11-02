@@ -11,7 +11,6 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 SYMBOL = "BTCUSDT"
-INTERVAL = "30m"
 
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -22,44 +21,65 @@ def send_telegram_message(text):
         print(f"Telegram error: {e}")
 
 def check_signal():
-    # Fetch last 3 candles: [0]=Previous closed, [1]=Just closed, [2]=Currently open
-    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit=3"
     try:
-        data = requests.get(url).json()
+        # Fetch 30m and 1h candles
+        # Limit=3 gives us: [0]=Previous closed, [1]=Just closed, [2]=Currently open
+        url_30m = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval=30m&limit=3"
+        url_1h = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval=1h&limit=3"
         
-        # Previous candle (T-2)
-        prev_high = float(data[0][2])
-        prev_low = float(data[0][3])
-        prev_close = float(data[0][4])
+        data_30m = requests.get(url_30m).json()
+        data_1h = requests.get(url_1h).json()
         
-        # Just closed candle (T-1)
-        curr_high = float(data[1][2])
-        curr_low = float(data[1][3])
-        curr_close = float(data[1][4])
+        # --- 30 MINUTE LOGIC ---
+        prev_30m_high = float(data_30m[0][2])
+        prev_30m_low = float(data_30m[0][3])
+        prev_30m_close = float(data_30m[0][4])
         
-        # Sweep Logic
-        low_taken = curr_low < prev_low
-        high_taken = curr_high > prev_high
+        curr_30m_high = float(data_30m[1][2])
+        curr_30m_low = float(data_30m[1][3])
+        curr_30m_close = float(data_30m[1][4])
         
-        bullish = False
-        bearish = False
-        sl = 0.0
+        # 30m Sweep Detection
+        low_taken_30m = curr_30m_low < prev_30m_low
+        high_taken_30m = curr_30m_high > prev_30m_high
         
-        # Bullish: Low or High taken, closes higher than previous close
-        if (low_taken or high_taken) and (curr_close > prev_close):
-            bullish = True
-            sl = curr_low
-            
-        # Bearish: Low or High taken, closes lower than previous close
-        elif (high_taken or low_taken) and (curr_close < prev_close):
-            bearish = True
-            sl = curr_high
-            
-        if bullish:
-            msg = f"🟢 <b>BULLISH SIGNAL</b> 🟢\nAsset: {SYMBOL} (30m)\nAction: BUY\nClose: {curr_close}\nStop Loss: {sl}"
+        bullish_30m = (low_taken_30m or high_taken_30m) and (curr_30m_close > prev_30m_close)
+        bearish_30m = (high_taken_30m or low_taken_30m) and (curr_30m_close < prev_30m_close)
+        
+        # --- 1 HOUR CONFLUENCE LOGIC ---
+        # Evaluate the last fully closed 1h candle
+        prev_1h_close = float(data_1h[0][4])
+        curr_1h_close = float(data_1h[1][4])
+        
+        # 1h aligns if it swept/closed higher OR continued higher (close > prev close)
+        bullish_1h = curr_1h_close > prev_1h_close
+        bearish_1h = curr_1h_close < prev_1h_close
+        
+        # --- SIGNAL GENERATION ---
+        if bullish_30m:
+            confluence = "100%" if bullish_1h else "75%"
+            sl = curr_30m_low
+            msg = (
+                f"🟢 <b>BULLISH SIGNAL</b> 🟢\n"
+                f"Asset: {SYMBOL}\n"
+                f"Confluence: <b>{confluence}</b>\n"
+                f"Action: BUY\n"
+                f"Close: {curr_30m_close}\n"
+                f"Stop Loss: {sl}"
+            )
             send_telegram_message(msg)
-        elif bearish:
-            msg = f"🔴 <b>BEARISH SIGNAL</b> 🔴\nAsset: {SYMBOL} (30m)\nAction: SELL\nClose: {curr_close}\nStop Loss: {sl}"
+            
+        elif bearish_30m:
+            confluence = "100%" if bearish_1h else "75%"
+            sl = curr_30m_high
+            msg = (
+                f"🔴 <b>BEARISH SIGNAL</b> 🔴\n"
+                f"Asset: {SYMBOL}\n"
+                f"Confluence: <b>{confluence}</b>\n"
+                f"Action: SELL\n"
+                f"Close: {curr_30m_close}\n"
+                f"Stop Loss: {sl}"
+            )
             send_telegram_message(msg)
             
     except Exception as e:
@@ -84,12 +104,9 @@ def bot_loop():
 
 @app.route('/')
 def home():
-    return "Crypto Signal Bot is Active."
+    return "Crypto Signal Bot (with 1H Confluence) is Active."
 
 if __name__ == '__main__':
-    # Run bot loop in background thread
     threading.Thread(target=bot_loop, daemon=True).start()
-    # Bind Flask to port for Render
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
-          
